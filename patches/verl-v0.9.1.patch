@@ -1,0 +1,328 @@
+diff --git a/verl/experimental/agent_loop/agent_loop.py b/verl/experimental/agent_loop/agent_loop.py
+index d0e3038..e5885da 100644
+--- a/verl/experimental/agent_loop/agent_loop.py
++++ b/verl/experimental/agent_loop/agent_loop.py
+@@ -820,30 +820,44 @@ class AgentLoopWorker:
+             ),
+         )
+         await self._compute_score([output], kwargs=kwargs)
+-        await self._compute_teacher_logprobs(
+-            output,
+-            prompt_ids=output.prompt_ids,
+-            response_ids=output.response_ids,
+-            validate=validate,
+-            sample_kwargs=kwargs,
+-        )
+-        teacher_ids, teacher_logprobs = (
+-            output.extra_fields.pop("teacher_ids", None),
+-            output.extra_fields.pop("teacher_logprobs", None),
+-        )
+-        if teacher_ids is not None and teacher_logprobs is not None:
+-            # TODO(wuxibin): remove padding and use tensordict.
+-            from verl.experimental.teacher_loop.teacher_manager import _pad_teacher_outputs
+-
+-            teacher_ids, teacher_logprobs = _pad_teacher_outputs(
+-                teacher_ids,
+-                teacher_logprobs,
+-                prompt_width=prompt_output["input_ids"].shape[1],
+-                response_width=response_output["input_ids"].shape[1],
+-                prompt_length=len(output.prompt_ids),
+-                response_length=len(output.response_ids),
+-                pad_token_id=self.tokenizer.pad_token_id,
++        skip_teacher = output.extra_fields.pop("skip_teacher", False)
++        if validate:
++            # Validation does not compute teacher logprobs; keep the schema empty
++            # so mixed masked/normal validation rows do not yield partial tensors.
++            teacher_ids, teacher_logprobs = None, None
++        elif skip_teacher and self.distillation_enabled:
++            # Keep the teacher tensors in the batch so a mixed batch keeps a uniform
++            # schema; the zero response mask prevents these rows from contributing.
++            teacher_width = prompt_output["input_ids"].shape[1] + response_output["input_ids"].shape[1]
++            teacher_ids = torch.full(
++                (1, teacher_width, 1), self.tokenizer.pad_token_id or 0, dtype=torch.int32
+             )
++            teacher_logprobs = torch.zeros((1, teacher_width, 1), dtype=torch.float32)
++        else:
++            await self._compute_teacher_logprobs(
++                output,
++                prompt_ids=output.prompt_ids,
++                response_ids=output.response_ids,
++                validate=validate,
++                sample_kwargs=kwargs,
++            )
++            teacher_ids, teacher_logprobs = (
++                output.extra_fields.pop("teacher_ids", None),
++                output.extra_fields.pop("teacher_logprobs", None),
++            )
++            if teacher_ids is not None and teacher_logprobs is not None:
++                # TODO(wuxibin): remove padding and use tensordict.
++                from verl.experimental.teacher_loop.teacher_manager import _pad_teacher_outputs
++
++                teacher_ids, teacher_logprobs = _pad_teacher_outputs(
++                    teacher_ids,
++                    teacher_logprobs,
++                    prompt_width=prompt_output["input_ids"].shape[1],
++                    response_width=response_output["input_ids"].shape[1],
++                    prompt_length=len(output.prompt_ids),
++                    response_length=len(output.response_ids),
++                    pad_token_id=self.tokenizer.pad_token_id,
++                )
+ 
+         return _InternalAgentLoopOutput(
+             prompt_ids=prompt_output["input_ids"],
+@@ -1037,7 +1051,11 @@ class AgentLoopWorker:
+         sample_kwargs: Optional[dict[str, Any]] = None,
+     ) -> None:
+         """Compute teacher logprobs for single sample."""
+-        if self.distillation_enabled and not validate:
++        if (
++            self.distillation_enabled
++            and not validate
++            and not output.extra_fields.get("skip_teacher", False)
++        ):
+             routing_key = None
+             if sample_kwargs is not None:
+                 routing_value = sample_kwargs.get(self.teacher_key)
+diff --git a/verl/trainer/distillation/losses.py b/verl/trainer/distillation/losses.py
+index b939c58..8a771f5 100644
+--- a/verl/trainer/distillation/losses.py
++++ b/verl/trainer/distillation/losses.py
+@@ -241,6 +241,16 @@ def distillation_loss(
+     - distillation_metrics: Dictionary of metrics.
+     """
+     assert distillation_config is not None
++    # Agent-STAR keeps overlong rows for group normalization but masks their loss.
++    mask = data["response_mask"]
++    if not (mask.values() if mask.is_nested else mask).any():
++        log_prob = model_output["log_probs"]
++        zero_loss = (log_prob.values() if log_prob.is_nested else log_prob).sum() * 0.0
++        return zero_loss, {
++            "distillation/abs_loss": Metric(AggregationType.MEAN, 0.0),
++            "distillation/loss_min": Metric(AggregationType.MIN, float("inf")),
++            "distillation/loss_max": Metric(AggregationType.MAX, float("-inf")),
++        }
+     loss_config: DistillationLossConfig = distillation_config.distillation_loss
+     distillation_loss_fn = get_distillation_loss_fn(loss_config.loss_mode)
+     distillation_losses, distillation_metrics = distillation_loss_fn(
+diff --git a/verl/trainer/main_ppo.py b/verl/trainer/main_ppo.py
+index c9b98d1..bc3edfa 100644
+--- a/verl/trainer/main_ppo.py
++++ b/verl/trainer/main_ppo.py
+@@ -50,6 +50,11 @@ def run_ppo(config, task_runner_class) -> None:
+         os.environ["PYTHONHASHSEED"] = str(rollout_cfg.seed)
+ 
+     trainer_logger = config.trainer.get("logger", [])
++    trainer_loggers = [trainer_logger] if isinstance(trainer_logger, str) else trainer_logger or []
++    tensorboard_dir = None
++    if "tensorboard" in trainer_loggers and config.trainer.default_local_dir:
++        tensorboard_dir = os.path.join(str(config.trainer.default_local_dir), "tensorboard")
++        os.environ["TENSORBOARD_DIR"] = tensorboard_dir
+     if "rl_insight" in ([trainer_logger] if isinstance(trainer_logger, str) else trainer_logger or []):
+         os.environ["VERL_RL_INSIGHT_ENABLE"] = "1"
+ 
+@@ -60,6 +65,8 @@ def run_ppo(config, task_runner_class) -> None:
+         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
+         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
+         default_runtime_env = get_ppo_ray_runtime_env(config)
++        if tensorboard_dir is not None:
++            default_runtime_env.setdefault("env_vars", {})["TENSORBOARD_DIR"] = tensorboard_dir
+         ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
+         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
+ 
+diff --git a/verl/trainer/ppo/metric_utils.py b/verl/trainer/ppo/metric_utils.py
+index 3de61d3..8cfe78d 100644
+--- a/verl/trainer/ppo/metric_utils.py
++++ b/verl/trainer/ppo/metric_utils.py
+@@ -15,6 +15,7 @@
+ Metrics related to the PPO trainer.
+ """
+ 
++import json
+ import logging
+ from collections import defaultdict
+ from functools import partial
+@@ -608,6 +609,123 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
+     return metrics
+ 
+ 
++def compute_agentstar_diagnostics(batch: DataProto, distillation_lambda: float = 0.0) -> dict[str, Any]:
++    """Compute Agent-STAR diagnostics that veRL does not aggregate by default.
++
++    Kept separate from ``compute_data_metrics`` so the upstream metric surface stays
++    stable. All values are scalar floats suitable for the console logger.
++    """
++    metrics: dict[str, Any] = {}
++    batch_size = len(batch)
++    if batch_size == 0:
++        return metrics
++
++    terminations = batch.non_tensor_batch.get("termination")
++    if terminations is not None:
++        normalized = [str(value).upper() if value is not None else "MISSING" for value in terminations]
++        counts: dict[str, int] = defaultdict(int)
++        for value in normalized:
++            counts[value] += 1
++        for value, count in sorted(counts.items()):
++            key = value.lower().replace(" ", "_").replace("/", "_")
++            metrics[f"termination/{key}_ratio"] = count / batch_size
++        abnormal = {"TIMEOUT", "ERROR", "TRUNCATION", "MAX_STEPS", "FORMAT_ERROR"}
++        metrics["termination/abnormal_ratio"] = sum(value in abnormal for value in normalized) / batch_size
++
++    uids = batch.non_tensor_batch.get("uid")
++    accuracies = batch.non_tensor_batch.get("acc")
++    if uids is not None and accuracies is not None and len(uids) == len(accuracies):
++        grouped: dict[str, list[float]] = defaultdict(list)
++        for uid, accuracy in zip(uids, accuracies, strict=False):
++            try:
++                value = float(accuracy)
++            except (TypeError, ValueError):
++                continue
++            if np.isfinite(value):
++                grouped[str(uid)].append(value)
++        group_means = [float(np.mean(values)) for values in grouped.values() if len(values) >= 2]
++        if group_means:
++            means = np.asarray(group_means, dtype=np.float64)
++            metrics["group/count"] = len(means)
++            metrics["group/success_rate"] = float(means.mean())
++            metrics["group/all_correct_ratio"] = float(np.mean(means >= 1.0 - 1e-6))
++            metrics["group/all_wrong_ratio"] = float(np.mean(means <= 1e-6))
++            metrics["group/zero_variance_ratio"] = float(
++                np.mean((means <= 1e-6) | (means >= 1.0 - 1e-6))
++            )
++
++    response_mask = batch.batch.get("response_mask")
++    teacher_logprobs = batch.batch.get("teacher_logprobs")
++    if response_mask is not None and teacher_logprobs is not None:
++        if teacher_logprobs.is_nested:
++            teacher_logprobs = teacher_logprobs.to_padded_tensor(0.0)
++        if teacher_logprobs.dim() == 3:
++            teacher_logprobs = teacher_logprobs[..., 0]
++        mask = response_mask.bool()
++        if (
++            teacher_logprobs.dim() == 2
++            and teacher_logprobs.shape[0] == mask.shape[0]
++            and teacher_logprobs.shape[1] >= mask.shape[1]
++        ):
++            teacher_logprobs = teacher_logprobs[:, -mask.shape[1] :]
++            teacher_signal = torch.isfinite(teacher_logprobs) & (teacher_logprobs != 0)
++            active_tokens = (mask & teacher_signal).sum()
++            valid_tokens = mask.sum()
++            token_ratio = (active_tokens / valid_tokens).item() if valid_tokens.item() else 0.0
++            active_samples = (mask & teacher_signal).any(dim=1)
++            metrics["opd/teacher_token_ratio"] = token_ratio
++            metrics["opd/teacher_sample_ratio"] = active_samples.float().mean().item()
++            metrics["distillation/lambda"] = float(distillation_lambda)
++            metrics["distillation/lambda_eff"] = float(distillation_lambda) * token_ratio
++
++    steps_by_sample = batch.non_tensor_batch.get("steps")
++    if steps_by_sample is not None:
++        total_steps = 0
++        error_steps = 0
++        repeated_steps = 0
++        for trajectory in steps_by_sample:
++            if not isinstance(trajectory, (list, tuple)):
++                continue
++            seen_actions: set[str] = set()
++            for step in trajectory:
++                total_steps += 1
++                if not isinstance(step, dict):
++                    continue
++                metadata = step.get("metadata") or {}
++                if isinstance(metadata, dict) and str(metadata.get("error", "")).strip():
++                    error_steps += 1
++                action = step.get("action")
++                try:
++                    action_key = json.dumps(action, sort_keys=True, default=str)
++                except (TypeError, ValueError):
++                    action_key = repr(action)
++                if action_key in seen_actions:
++                    repeated_steps += 1
++                seen_actions.add(action_key)
++        metrics["tool/steps_per_sample"] = total_steps / batch_size
++        metrics["tool/error_step_ratio"] = error_steps / total_steps if total_steps else 0.0
++        metrics["tool/repeated_action_ratio"] = repeated_steps / total_steps if total_steps else 0.0
++
++    calls_by_sample = batch.non_tensor_batch.get("calls")
++    if calls_by_sample is not None:
++        total_calls = 0
++        length_finishes = 0
++        for calls in calls_by_sample:
++            if not isinstance(calls, (list, tuple)):
++                continue
++            for call in calls:
++                total_calls += 1
++                if isinstance(call, dict) and str(call.get("finish_reason", "")).lower() in {
++                    "length",
++                    "max_tokens",
++                }:
++                    length_finishes += 1
++        metrics["generation/calls_per_sample"] = total_calls / batch_size
++        metrics["generation/length_finish_ratio"] = length_finishes / total_calls if total_calls else 0.0
++
++    return metrics
++
++
+ def compute_timing_metrics(batch: DataProto, timing_raw: dict[str, float]) -> dict[str, Any]:
+     """
+     Computes timing metrics for different processing stages in PPO training.
+diff --git a/verl/trainer/ppo/ray_trainer.py b/verl/trainer/ppo/ray_trainer.py
+index 9352bcf..ab283c6 100644
+--- a/verl/trainer/ppo/ray_trainer.py
++++ b/verl/trainer/ppo/ray_trainer.py
+@@ -42,6 +42,7 @@ from verl.trainer.distillation.losses import is_distillation_enabled
+ from verl.trainer.ppo import core_algos
+ from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
+ from verl.trainer.ppo.metric_utils import (
++    compute_agentstar_diagnostics,
+     compute_data_metrics,
+     compute_throughout_metrics,
+     compute_timing_metrics,
+@@ -1770,6 +1771,15 @@ class RayPPOTrainer:
+                 )
+                 # collect metrics
+                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
++                distillation_lambda = 0.0
++                distillation_cfg = self.config.get("distillation", None)
++                if distillation_cfg is not None and distillation_cfg.get("enabled", False):
++                    loss_cfg = distillation_cfg.get("distillation_loss", None)
++                    if loss_cfg is not None:
++                        distillation_lambda = float(loss_cfg.get("distillation_loss_coef", 0.0) or 0.0)
++                metrics.update(
++                    compute_agentstar_diagnostics(batch=batch, distillation_lambda=distillation_lambda)
++                )
+                 # GDPO per-component reward metrics
+                 gdpo_reward_keys = self.config.algorithm.get("gdpo_reward_keys", None)
+                 if gdpo_reward_keys and self.config.algorithm.adv_estimator in ("gdpo", AdvantageEstimator.GDPO):
+diff --git a/verl/workers/rollout/llm_server.py b/verl/workers/rollout/llm_server.py
+index a5c5731..d9d7710 100644
+--- a/verl/workers/rollout/llm_server.py
++++ b/verl/workers/rollout/llm_server.py
+@@ -315,6 +315,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
+             if output.num_preempted is not None:
+                 final_output.num_preempted += output.num_preempted
+             final_output.stop_reason = output.stop_reason
++            final_output.extra_fields["finish_reason"] = output.extra_fields.get("finish_reason")
+ 
+             # carry the initial prefill's prefix-cache hit count forward
+             if num_cached_tokens is None:
+@@ -331,6 +332,8 @@ class FullyAsyncLLMServerClient(LLMServerClient):
+                 sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
+                 if len(final_output.token_ids) >= original_max_tokens:
+                     final_output.stop_reason = "length"
++                    if final_output.extra_fields["finish_reason"] not in ("stop", "length"):
++                        final_output.extra_fields["finish_reason"] = "length"
+                     break
+ 
+             # 4. check stop reason
+diff --git a/verl/workers/rollout/vllm_rollout/vllm_async_server.py b/verl/workers/rollout/vllm_rollout/vllm_async_server.py
+index 068a469..8595731 100644
+--- a/verl/workers/rollout/vllm_rollout/vllm_async_server.py
++++ b/verl/workers/rollout/vllm_rollout/vllm_async_server.py
+@@ -718,6 +718,7 @@ class vLLMHttpServer:
+ 
+         # Determine stop reason from finish_reason
+         finish_reason = final_res.outputs[0].finish_reason
++        extra_fields["finish_reason"] = finish_reason
+         if finish_reason == "abort":
+             stop_reason = "aborted"
+         elif finish_reason in ("stop", "length"):

@@ -1,0 +1,49 @@
+agentstar:
+  system_prompt_source: /home/xiongzhou/Agent-STAR/RL/examples/travel/qwen35_action_history_prompt.json
+  timeout_seconds: 1800
+  failure_reward:
+    enabled: true
+    soft_buffer_fraction: 0.2
+    max_soft_penalty: 1.0
+    invalid_action_penalty: 1.0
+  formatter_url: https://integrate.api.nvidia.com/v1
+  formatter_model: nvidia/nemotron-3.5-super-vl-120b-a12b
+
+# Overlay onto the original frozen recipe; no model/reward/batch changes.
+trainer:
+  use_v1: true
+  experiment_name: curriculum_pg_opd_k1_lambda01_colocate_async
+  v1:
+    trainer_mode: colocate_async
+    colocate_async:
+      num_warmup_batches: 1
+    sampler:
+      max_off_policy_threshold: 1
+      max_off_policy_strategy: wait
+      custom_sampler:
+        path: /home/xiongzhou/Agent-STAR/RL/agentstar_async_travel_loop.py
+        name: AgentStarAsyncReplayBuffer
+data:
+  apply_chat_template_kwargs:
+    preserve_thinking: false
+transfer_queue:
+  enable: true
+actor_rollout_ref:
+  rollout:
+    enforce_eager: false
+    agent:
+      default_agent_loop: agentstar_travel_async
+      agent_loop_manager_class: agentstar_async_travel_loop.AgentStarAsyncLoopManager
+algorithm:
+  rollout_correction:
+    # Native two-policy path: anchor both GRPO and PG-k1 on the actual behavior logprobs.
+    bypass_mode: true
+
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      env_vars:
+        AGENT_STAR_FORMATTER_RPM: '30'
+        AGENT_STAR_FORMATTER_RATE_FILE: /home/xiongzhou/.cache/agentstar/nvidia_formatter_rate
+        AGENT_STAR_FORMATTER_DNS_SERVERS: '10.96.0.2 218.192.240.2'
+        AGENT_STAR_FORMATTER_API_KEY_FILE: /home/xiongzhou/.config/agentstar/nvidia_api_key

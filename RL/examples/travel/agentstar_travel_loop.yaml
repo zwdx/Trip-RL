@@ -1,0 +1,2 @@
+- name: agentstar_travel
+  _target_: agentstar_travel_loop.AgentStarTravelLoop

@@ -1,0 +1,171 @@
+# Merge onto the pinned upstream ppo_trainer config; no second trainer implementation.
+agentstar:
+  train_source: /home/xiongzhou/Agent-STAR/RL/rllm/data/travel_1107_1K_E4M3H3_1212.jsonl
+  val_source: /home/xiongzhou/Agent-STAR/RL/rllm/data/travel_val90.jsonl
+  system_prompt_source: /data/xiongzhou/agent_star_runs/qwen35_sft_epoch4_vs_epoch6_test200_20261021/epoch6/config.json
+  single_turn_max_tokens: 32768
+  max_context: 65536
+  max_turns: 60
+  timeout_seconds: 600
+  formatter_url: null
+  formatter_model: Qwen3.8-27B-FP8
+
+data:
+  train_batch_size: 32
+  val_batch_size: 90
+  max_prompt_length: 2048
+  max_response_length: 63488
+  filter_overlong_prompts: false
+  truncation: error
+  dataloader_num_workers: 0
+  seed: 42
+  apply_chat_template_kwargs:
+    enable_thinking: true
+    preserve_thinking: true
+
+actor_rollout_ref:
+  model:
+    path: /data/xiongzhou/agent_star_runs/qwen35_2b_sft_ep6_mb2_gpu13_20261021/train/checkpoint-90
+    use_remove_padding: false
+    use_fused_kernels: true
+    fused_kernel_options:
+      impl_backend: torch
+    enable_gradient_checkpointing: true
+    enable_activation_offload: true
+    override_config:
+      attn_implementation: sdpa
+  actor:
+    strategy: fsdp2
+    ppo_mini_batch_size: 32
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_epochs: 1
+    use_dynamic_bsz: false
+    ppo_max_token_len_per_gpu: 65536
+    use_torch_compile: false
+    loss_agg_mode: token-mean
+    use_kl_loss: false
+    entropy_coeff: 0.0
+    grad_clip: 1.0
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    optim:
+      lr: 2.0e-6
+      lr_warmup_steps: 0
+      lr_scheduler_type: constant
+    fsdp_config:
+      param_offload: true
+      optimizer_offload: true
+      offload_policy: true
+      use_torch_compile: false
+  rollout:
+    name: vllm
+    mode: async
+    n: 8
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    seed: 42
+    max_model_len: 65536
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.50
+    max_num_seqs: 32
+    max_num_batched_tokens: 32768
+    enforce_eager: true
+    calculate_log_probs: true
+    logprobs_mode: raw_logprobs
+    log_prob_micro_batch_size_per_gpu: 1
+    log_prob_use_dynamic_bsz: false
+    log_prob_max_token_len_per_gpu: 65536
+    engine_kwargs:
+      vllm:
+        language_model_only: true
+    agent:
+      num_workers: 8
+      default_agent_loop: agentstar_travel
+      agent_loop_manager_class: agentstar_travel_loop.AgentStarLoopManager
+    val_kwargs:
+      n: 1
+      do_sample: true
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  filter_groups:
+    enable: false
+
+distillation:
+  enabled: true
+  nnodes: 1
+  n_gpus_per_node: 1
+  teacher_models:
+    teacher_model:
+      model_path: /data/xiongzhou/Models/Qwen3.8-27B-FP8
+      num_replicas: 1
+      inference:
+        name: vllm
+        dtype: bfloat16
+        tensor_model_parallel_size: 1
+        expert_parallel_size: 1
+        max_model_len: 65537
+        max_num_seqs: 8
+        max_num_batched_tokens: 4096
+        gpu_memory_utilization: 0.75
+        temperature: 1.0
+        enable_sleep_mode: false
+        skip_tokenizer_init: false
+        logprobs_mode: raw_logprobs
+        engine_kwargs:
+          vllm:
+            language_model_only: true
+            # Native OPD otherwise caps the shared OpenAI formatter at one token.
+            override_generation_config: '{"max_new_tokens":8192}'
+  distillation_loss:
+    loss_mode: k1
+    use_policy_gradient: true
+    use_task_rewards: true
+    distillation_loss_coef: 0.1
+    loss_max_clamp: 10.0
+    log_prob_min_clamp: null
+    policy_loss_mode: vanilla
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+
+trainer:
+  use_v1: false
+  total_epochs: 5
+  total_training_steps: null
+  n_gpus_per_node: 2
+  nnodes: 1
+  project_name: AgentSTAR_Qwen35
+  experiment_name: curriculum_pg_opd_k1_lambda01
+  logger: [console, tensorboard]
+  default_local_dir: null
+  default_hdfs_dir: null
+  resume_mode: auto
+  val_before_train: true
+  test_freq: 20
+  save_freq: 20
+  max_actor_ckpt_to_keep: 10
+  rollout_data_dir: ${trainer.default_local_dir}/rollouts
+  validation_data_dir: ${trainer.default_local_dir}/validation
+
+ray_kwargs:
+  ray_init:
+    address: local
+    runtime_env:
+      py_executable: null
+      env_vars:
+        PYTHONPATH: /home/xiongzhou/Agent-STAR/RL
+        TOKENIZERS_PARALLELISM: 'false'
+        OMP_NUM_THREADS: '4'
+        TOOL_CALL_ERROR: 'false'
+        TOOL_CALL_ERROR_PERCENTAGE: '0'
+        VLLM_USE_FLASHINFER_SAMPLER: '0'
+        AGENT_STAR_FORMATTER_CONNECT_TIMEOUT: '10'
+        AGENT_STAR_FORMATTER_TIMEOUT: '300'
+        AGENT_STAR_FORMATTER_RETRIES: '2'
+        AGENT_STAR_FORMATTER_MAX_CONCURRENCY: '1'
+        AGENT_STAR_TOOL_PARALLELISM: '4'

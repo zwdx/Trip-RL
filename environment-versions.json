@@ -1,0 +1,10 @@
+{
+  "torch": "2.11.0+cu129",
+  "transformers": "5.9.0",
+  "vllm": "0.25.1+cu129",
+  "ray": "2.52.1",
+  "tensordict": "0.10.0",
+  "hydra-core": "1.3.2",
+  "openai": "2.45.0",
+  "transferqueue": "0.1.9 (isolated dependency directory; not base environment)"
+}

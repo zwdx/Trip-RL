@@ -1,0 +1,73 @@
+{
+  "protocol_version": "sft_epoch4_vs_epoch6_fixed200_64k16k_candidate_v1",
+  "phase": "frozen_formal",
+  "models": {
+    "epoch4": "/data/xiongzhou/agent_star_runs/qwen35_2b_sft_20261021/train/checkpoint-60",
+    "epoch6": "/data/xiongzhou/agent_star_runs/qwen35_2b_sft_ep6_mb2_gpu13_20261021/train/checkpoint-90"
+  },
+  "frozen_dir": "/data/xiongzhou/agent_star_runs/frozen_travelplanner_test200_v1",
+  "test200_sha256": "e0c81eeb6b80cca80c4cb24bce01b978b128a958c8d2bcf22235603f796a73ec",
+  "seed": 42,
+  "max_context": 65536,
+  "max_tokens": 16384,
+  "max_turns": 60,
+  "generation": {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "min_p": 0.0,
+    "repetition_penalty": 1.1,
+    "presence_penalty": 0.0,
+    "enable_thinking": true,
+    "reasoning_effort": null,
+    "stop_token_ids": [
+      248046,
+      248044
+    ],
+    "preserve_thinking": true,
+    "max_tokens": 16384
+  },
+  "system_prompt": "You are a helpful travel assistant. Your task is to help users create a comprehensive travel plan that fully satisfies their specific requirements. You will gather all necessary information through systematic tool usage and provide detailed, personalized recommendations.\n\nCritical Format Requirements:\nThe assistant generation prefix already contains <think>. Continue reasoning without emitting another opening <think>.\nBefore any tool call or final answer, emit exactly one </think> to close reasoning.\nAfter </think>, emit exactly one complete <tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call> OR <answer>final travel plan</answer>.\nNever emit <tool_call> or <answer> before </think>. Never end the response before closing reasoning and the action block.\nUse only one tool call per response. After gathering all information, use <answer>...</answer>.\n\nAvailable tools:\n<tools>\n{\n    \"name\": \"SearchFlight\", \n    \"description\": \"Search for flight information between cities on specific dates.\",\n    \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"departure\": {\n                \"type\": \"string\",\n                \"description\": \"The departure city name.\"\n            },\n            \"destination\": {\n                \"type\": \"string\",\n                \"description\": \"The destination city name.\"\n            },\n            \"date\": {\n                \"type\": \"string\",\n                \"description\": \"Travel date in YYYY-MM-DD format.\"\n            }\n        },\n        \"required\": [\"departure\", \"destination\", \"date\"]\n    }\n},\n{\n    \"name\": \"GoogleDistanceMatrix\",\n    \"description\": \"Calculate distance, travel time, and cost between two cities.\",\n    \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"departure\": {\n                \"type\": \"string\",\n                \"description\": \"The departure city name.\"\n            },\n            \"destination\": {\n                \"type\": \"string\",\n                \"description\": \"The destination city name.\"\n            },\n            \"mode\": {\n                \"type\": \"string\",\n                \"description\": \"Transportation mode: 'driving' or 'taxi'.\"\n            }\n        },\n        \"required\": [\"departure\", \"destination\", \"mode\"]\n    }\n},\n{\n    \"name\": \"SearchAccommodation\",\n    \"description\": \"Find accommodation options in a specific city.\",\n    \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"city\": {\n                \"type\": \"string\",\n                \"description\": \"The city name to search for accommodations.\"\n            }\n        },\n        \"required\": [\"city\"]\n    }\n},\n{\n    \"name\": \"SearchRestaurant\",\n    \"description\": \"Find restaurant options in a specific city.\",\n    \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"city\": {\n                \"type\": \"string\",\n                \"description\": \"The city name to search for restaurants.\"\n            }\n        },\n        \"required\": [\"city\"]\n    }\n},\n{\n    \"name\": \"SearchAttraction\",\n    \"description\": \"Find tourist attractions in a specific city.\",\n    \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"city\": {\n                \"type\": \"string\",\n                \"description\": \"The city name to search for attractions.\"\n            }\n        },\n        \"required\": [\"city\"]\n    }\n},\n{\n    \"name\": \"SearchCity\",\n    \"description\": \"Find cities within a specific state.\",\n    \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"state\": {\n                \"type\": \"string\",\n                \"description\": \"The state name to search for cities.\"\n            }\n        },\n        \"required\": [\"state\"]\n    }\n}\n</tools>\n\nTask Guidelines\n\n1. **Consistent Role as Travel Planner**: Always maintain your role as a Travel Assistant. Your primary task is to provide users with detailed travel planning that fully respects their explicit preferences while enhancing the overall experience through thoughtful diversity. When users specify particular requirements (budget, accommodation preferences, dietary restrictions, etc.), strictly adhere to these preferences. \n\n2. **Single Tool Call Discipline**: For each piece of required information, use exactly one tool and invoke it with a single <tool_call></tool_call> sequence. Do not combine or chain multiple tool calls in a single response.\n\n3. **Absolute Trust in Tool Output**: Treat all tool outputs as authoritative and complete. Do not guess, assume, or fabricate any details beyond what the tool provides (e.g., do not invent a breakfast like \"hotel coffee\"). All elements of the plan, e.g., flights, accommodations, meals, and attractions, must **STRICTLY** align with the data returned from the tools. Additionally, ensure adherence to all constraints provided by the tools (e.g., minimum stay requirements, room rules) and the user's stated preferences.\n\n4. **Comprehensive Itinerary Synthesis**: Once all required information is gathered, compile a clear, day-by-day travel itinerary that includes: transportation (**BOTH** outbound and return journey if applicable), accommodation, attractions (e.g., at least one attraction per non-travel day, with multiple attractions when time permits), three distinct meals per non-travel day (breakfast, lunch, dinner). Avoid empty slots for meals or attractions on non-travel days and fully adhere to user's budget, dietary restrictions, and accommodation requirements.\n\nExample continuations (syntax only; use the actual task and tool results). The opening <think> is already supplied.\n\nTool-call continuation:\nI need to find the available cities.\n</think>\n<tool_call>{\"name\":\"SearchCity\",\"arguments\":{\"state\":\"Ohio\"}}</tool_call>\n\nFinal-answer continuation:\nI have gathered the information needed for the itinerary.\n</think>\n<answer>Final day-by-day itinerary using the retrieved information.</answer>\n\nNow begin the conversation with the user.\n",
+  "server_cfg": {
+    "raw_response_tokens": true,
+    "bounded_context": true,
+    "require_closed_answer": true,
+    "tokenizer_path": "/data/xiongzhou/agent_star_runs/qwen35_2b_sft_ep6_mb2_gpu13_20261021/train/checkpoint-90"
+  },
+  "per_gpu_client_concurrency": {
+    "0": 8,
+    "1": 16,
+    "2": 8,
+    "3": 6
+  },
+  "vllm_max_num_seqs": 64,
+  "max_num_batched_tokens": 8192,
+  "formatter": {
+    "model": "Qwen3.8-27B-FP8",
+    "mode": "sequential_after_student_generation",
+    "preferred_gpu": 1,
+    "max_context": 32768,
+    "max_tokens": 8192,
+    "temperature": 0,
+    "enable_thinking": false,
+    "concurrency_candidate": 16,
+    "capacity_validation": "reuse previous baseline formatter witness; not newly profiled in this preparation"
+  },
+  "scoring_protocol": "/data/xiongzhou/agent_star_runs/qwen35_sft_eval_preflight_20261021/scoring_protocol.json",
+  "entrypoint": "Inference/main.py",
+  "remaining_entry_checks_before_formal_launch": [
+    "Guard unclosed native thinking from being parsed as tool action in existing shared call path, preserving author retry/turn behavior.",
+    "Validate formatter fidelity against source itinerary; empty/invalid plans must never be expanded into invented itineraries."
+  ],
+  "comparison_note": "epoch4/6 use identical settings; old pretrained baseline32K/8K is a different protocol and not a controlled model-only comparison.",
+  "tokenizer_paths": {
+    "epoch4": "/data/xiongzhou/agent_star_runs/qwen35_2b_sft_20261021/train/checkpoint-60",
+    "epoch6": "/data/xiongzhou/agent_star_runs/qwen35_2b_sft_ep6_mb2_gpu13_20261021/train/checkpoint-90"
+  },
+  "server_cfg_note": "At each condition launch, set server_cfg.tokenizer_path to that condition checkpoint path; use its saved native chat template.",
+  "official_evaluation_client": "/data/xiongzhou/agent_star_runs/qwen35_sft_eval_preflight_20261021/official_evaluate.py",
+  "official_evaluation_client_requires": "--submission SUBMISSION1000 --manifest FROZEN_DIR/manifest.json --scoring-protocol R/scoring_protocol.json --output-dir CONDITION/official",
+  "condition": "epoch6",
+  "model": "sft-profile",
+  "model_path": "/data/xiongzhou/agent_star_runs/qwen35_2b_sft_ep6_mb2_gpu13_20261021/train/checkpoint-90"
+}

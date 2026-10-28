@@ -1,0 +1,5 @@
+# Prepared source rows carry agentstar_travel; native workers prioritize that field.
+- name: agentstar_travel
+  _target_: agentstar_async_travel_loop.AgentStarAsyncTravelLoop
+- name: agentstar_travel_async
+  _target_: agentstar_async_travel_loop.AgentStarAsyncTravelLoop
